@@ -382,6 +382,7 @@ function refreshLikes() {
   });
   updateNowPlaying();
   if (view().name === 'list' && view().arg === 'liked') render();
+  if (view().name === 'search') renderSearchResults();
 }
 
 function playCtx(ctx, startIndex = -1, shuffleStart = false) {
@@ -399,6 +400,7 @@ function playFromRow(ctx, i) {
   if (ctx === 'queue:next') { queue.pos += i + 1; return player.playIndex(); }
   if (player.current && player.current.id === track.id) return openFull();
   const base = ctx === 'home:new' ? 'all' : ctx.replace(/#f$/, '');
+  if (base === 'search') { queue.set(lists.search, i, 'search'); return player.playIndex(); }
   const full = listFromCtx(base);
   const idx = Math.max(0, full.findIndex((x) => x.id === track.id));
   queue.set(full, idx, base);
@@ -416,7 +418,7 @@ function emptyHtml() {
 
 VIEWS.home = (el) => {
   const h = new Date().getHours();
-  setTop(h < 5 ? 'Доброй ночи' : h < 12 ? 'Доброе утро' : h < 18 ? 'Добрый день' : 'Добрый вечер', `<button class="icon-btn" data-act="import" aria-label="Добавить музыку">${icon('upload')}</button>`);
+  setTop(h < 5 ? 'Доброй ночи' : h < 12 ? 'Доброе утро' : h < 18 ? 'Добрый день' : 'Добрый вечер', `<button class="icon-btn" data-act="search" aria-label="Поиск">${icon('search')}</button><button class="icon-btn" data-act="import" aria-label="Добавить музыку">${icon('upload')}</button>`);
   if (!allTracks.length) { el.innerHTML = `<div class="page">${emptyHtml()}</div>`; return; }
   const quick = ['all', 'liked', ...lib.playlists.map((p) => 'pl:' + p.id)].slice(0, 6);
   let html = `<div class="page"><div class="quick">${quick.map((c) => `<div class="quick-item" data-open="${esc(c)}">${listCover(c)}<div class="tt">${esc(ctxTitle(c))}</div></div>`).join('')}</div>`;
@@ -444,8 +446,8 @@ function listPage(el, ctx) {
   const own = ctx.startsWith('pl:');
   const v = view();
   const filter = v.filter || '';
-  const shown = filter ? tracks.filter((t) => `${t.artist} ${t.title} ${t.album}`.toLowerCase().includes(filter.toLowerCase())) : tracks;
-  setTop(ctx === 'all' ? 'Треки' : '', ctx === 'all' ? `<button class="icon-btn" data-act="import" aria-label="Добавить музыку">${icon('upload')}</button>` : own ? `<button class="icon-btn" data-act="plmenu" aria-label="Ещё">${icon('more')}</button>` : '');
+  const shown = filter ? tracks.filter(matcher(filter)) : tracks;
+  setTop(ctx === 'all' ? 'Треки' : '', ctx === 'all' ? `<button class="icon-btn" data-act="search" aria-label="Поиск">${icon('search')}</button><button class="icon-btn" data-act="import" aria-label="Добавить музыку">${icon('upload')}</button>` : own ? `<button class="icon-btn" data-act="plmenu" aria-label="Ещё">${icon('more')}</button>` : '');
   el.innerHTML = `<div class="page">
     <div class="hero">${listCover(ctx, 'big')}
       <div class="hero-tx"><h1 ${own ? 'data-act="rename"' : ''}>${esc(name)}</h1><div class="st">${tracksWord(tracks.length)}${total ? ' · ' + fmtLong(total) : ''}</div></div>
@@ -456,7 +458,7 @@ function listPage(el, ctx) {
       ${own ? `<button class="btn ghost small" data-act="importpl">${icon('upload')}Добавить файлы</button>` : ''}
       ${ctx === 'recent' && tracks.length ? `<button class="btn ghost small" data-act="clearrecent">Очистить</button>` : ''}
     </div>
-    ${tracks.length > 8 ? `<label class="filter">${icon('search')}<input id="plFilter" placeholder="Искать в списке" value="${esc(filter)}" enterkeyhint="search"></label>` : ''}
+    ${tracks.length ? `<label class="filter">${icon('search')}<input id="plFilter" placeholder="Искать в списке" value="${esc(filter)}" enterkeyhint="search"></label>` : ''}
     ${ctx === 'all' && tracks.length ? `<div class="chips">${[['added', 'Новые'], ['title', 'Название'], ['artist', 'Исполнитель']].map(([k, n]) => `<button class="chip ${lib.settings.sort === k ? 'on' : ''}" data-sort="${k}">${n}</button>`).join('')}</div>` : ''}
     ${tracks.length ? trackList(shown, filter ? ctx + '#f' : ctx)
       : ctx === 'all' ? emptyHtml()
@@ -466,10 +468,48 @@ function listPage(el, ctx) {
   if (inp) inp.oninput = () => { v.filter = inp.value; const pos = inp.selectionStart; render(); const n = $('#plFilter'); n.focus(); n.setSelectionRange(pos, pos); };
 }
 VIEWS.all = (el) => listPage(el, 'all');
+
+// ------------------------------------------------------------ search in the library
+// Every word of the query has to appear in the title, artist or album; «ё» counts as «е».
+const norm = (x) => String(x || '').toLowerCase().replace(/ё/g, 'е');
+function matcher(q) {
+  const words = norm(q).split(/\s+/).filter(Boolean);
+  return (t) => { const hay = norm(`${t.title} ${t.artist} ${t.album} ${t.name || ''}`); return words.every((w) => hay.includes(w)); };
+}
+let searchQuery = '';
+VIEWS.search = (el) => {
+  setTop('Поиск');
+  el.innerHTML = `<div class="page">
+    <label class="filter search-field">${icon('search')}<input id="searchInput" type="search" placeholder="Трек, исполнитель или альбом" value="${esc(searchQuery)}" enterkeyhint="search" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="icon-btn ${searchQuery ? '' : 'hidden'}" id="searchClear" aria-label="Очистить">${icon('close')}</button></label>
+    <div id="searchResults"></div></div>`;
+  const inp = $('#searchInput');
+  inp.oninput = () => { searchQuery = inp.value; $('#searchClear').classList.toggle('hidden', !searchQuery); renderSearchResults(); };
+  inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur(); };
+  $('#searchClear').onclick = (e) => { e.preventDefault(); searchQuery = ''; inp.value = ''; $('#searchClear').classList.add('hidden'); renderSearchResults(); inp.focus(); };
+  renderSearchResults();
+  if (!searchQuery) setTimeout(() => inp.focus(), 50);
+};
+// Only the results are redrawn while typing, so the keyboard stays open.
+function renderSearchResults() {
+  const box = $('#searchResults');
+  if (!box) return;
+  const q = searchQuery.trim();
+  if (!allTracks.length) { box.innerHTML = emptyHtml(); return; }
+  if (!q) { box.innerHTML = `<div class="empty">${icon('search')}<h3>Поиск по твоей музыке</h3><p>Ищет среди ${tracksWord(allTracks.length)}: по названию, исполнителю и альбому. Можно писать несколько слов, например «сплин романс».</p></div>`; return; }
+  const found = sorted(allTracks).filter(matcher(q));
+  const pls = lib.playlists.filter((p) => norm(p.name).includes(norm(q)));
+  let html = '';
+  if (pls.length) html += `<h2 class="sec">Плейлисты</h2><div class="lib-list">${pls.map((p) => `<div class="lib-item" data-open="pl:${p.id}">${listCover('pl:' + p.id)}<div class="meta"><div class="tt">${esc(p.name)}</div><div class="st">Плейлист · ${tracksWord(resolveIds(p.ids).length)}</div></div></div>`).join('')}</div>`;
+  if (found.length) html += `<h2 class="sec">Треки <small>${tracksWord(found.length)}</small></h2>${trackList(found, 'search')}`;
+  if (!html) html = `<div class="empty">${icon('search')}<h3>Ничего не нашлось</h3><p>По запросу «${esc(q)}» в твоей музыке ничего нет. Попробуй написать короче или иначе.</p></div>`;
+  box.innerHTML = html;
+  markPlaying();
+}
 VIEWS.list = (el, ctx) => (ctxExists(ctx) ? listPage(el, ctx) : VIEWS.home(el));
 
 VIEWS.playlists = (el) => {
-  setTop('Плейлисты', `<button class="icon-btn" data-act="newpl" aria-label="Новый плейлист">${icon('add')}</button>`);
+  setTop('Плейлисты', `<button class="icon-btn" data-act="search" aria-label="Поиск">${icon('search')}</button><button class="icon-btn" data-act="newpl" aria-label="Новый плейлист">${icon('add')}</button>`);
   const items = ['liked', ...lib.playlists.map((p) => 'pl:' + p.id)];
   el.innerHTML = `<div class="page"><div class="lib-list">
     <button class="lib-item new" data-act="newpl"><div class="cv">${icon('add')}</div><div class="meta"><div class="tt">Новый плейлист</div></div></button>
@@ -778,6 +818,7 @@ $('#prevBtn').onclick = () => player.prev();
 $('#miniPlay').onclick = (e) => { e.stopPropagation(); player.toggle(); };
 $('#miniNext').onclick = (e) => { e.stopPropagation(); player.next(); };
 $('#miniLike').onclick = (e) => { e.stopPropagation(); toggleLike(player.current); };
+$('#miniClose').onclick = (e) => { e.stopPropagation(); player.close(); };
 $('#fullLike').onclick = () => toggleLike(player.current);
 $('#mini').onclick = () => openFull();
 $('#fullDown').onclick = () => closeFull();
@@ -990,6 +1031,7 @@ document.addEventListener('click', async (e) => {
   const ctx = v.name === 'all' ? 'all' : v.arg;
   switch (act.dataset.act) {
     case 'import': pickFiles(); break;
+    case 'search': go('search'); break;
     case 'importpl': pickFiles(getPlaylist(String(ctx).slice(3))); break;
     case 'newpl': { const n = await prompt2('Новый плейлист', `Мой плейлист № ${lib.playlists.length + 1}`, 'Создать'); if (n) { const p = createPlaylist(n); go('list', 'pl:' + p.id); } break; }
     case 'rename': { const p = getPlaylist(String(ctx).slice(3)); if (p) renamePlaylist(p); break; }

@@ -259,3 +259,15 @@ body.full-open #toasts { bottom: calc(var(--safe-b) + 24px); }
   .quick { grid-template-columns: repeat(3, 1fr); }
   .page, .full-inner { max-width: 760px; margin: 0 auto; }
 }
+
+/* library search */
+.search-field { height: 48px; margin: 2px 0 12px; padding-right: 4px; }
+.search-field input { font-size: 17px; }
+.search-field input::-webkit-search-cancel-button { display: none; }
+.search-field .icon-btn { width: 36px; height: 36px; }
+
+/* mini player close button */
+#mini .icon-btn { width: 40px; height: 40px; }
+#mini .mini-close { width: 34px; margin-left: -4px; }
+#mini .mini-close .ic { width: 20px; height: 20px; }
+.filter input::placeholder { color: var(--dim); opacity: 1; }
