@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Melodia</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#26473e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Melodia">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="ambient"></div>
+
+  <header id="top">
+    <button class="round hidden" id="backBtn" aria-label="Назад"><span data-icon="back"></span></button>
+    <h1 id="topTitle">Melodia</h1>
+    <div id="topActions"></div>
+  </header>
+
+  <main id="view"></main>
+
+  <div id="mini" class="hidden">
+    <div class="mini-progress"><div class="fill"></div></div>
+    <div class="mini-cover" id="miniCover"></div>
+    <div class="mini-meta"><div class="tt" id="miniTitle"></div><div class="st" id="miniArtist"></div></div>
+    <button class="icon-btn" id="miniLike" aria-label="Любимое"><span data-icon="heart"></span></button>
+    <button class="icon-btn" id="miniPlay" aria-label="Играть"><span data-icon="play"></span></button>
+    <button class="icon-btn" id="miniNext" aria-label="Далее"><span data-icon="next"></span></button>
+  </div>
+
+  <nav id="tabs"></nav>
+
+  <section id="full" aria-hidden="true">
+    <div class="full-bg" id="fullBg"></div>
+    <div class="full-inner">
+      <div class="full-head">
+        <button class="icon-btn" id="fullDown" aria-label="Свернуть"><span data-icon="chevronDown"></span></button>
+        <div class="full-from" id="fullFrom"></div>
+        <button class="icon-btn" id="fullMore" aria-label="Ещё"><span data-icon="more"></span></button>
+      </div>
+      <div class="full-cover" id="fullCover"></div>
+      <div class="full-meta">
+        <div class="tx"><div class="tt" id="fullTitle"></div><div class="st" id="fullArtist"></div></div>
+        <button class="icon-btn likebtn" id="fullLike" aria-label="Любимое"><span data-icon="heart"></span></button>
+      </div>
+      <div class="slider" id="seek"><div class="fill"></div><div class="knob"></div></div>
+      <div class="times"><span id="curTime">0:00</span><span id="durTime">0:00</span></div>
+      <div class="full-ctrl">
+        <button class="icon-btn" id="shuffleBtn" aria-label="Перемешать"><span data-icon="shuffle"></span></button>
+        <button class="icon-btn big" id="prevBtn" aria-label="Назад"><span data-icon="prev"></span></button>
+        <button class="play-btn" id="playBtn" aria-label="Играть"><span data-icon="play"></span></button>
+        <button class="icon-btn big" id="nextBtn" aria-label="Далее"><span data-icon="next"></span></button>
+        <button class="icon-btn" id="repeatBtn" aria-label="Повтор"><span data-icon="repeat"></span></button>
+      </div>
+      <div class="full-next" id="fullNext"></div>
+    </div>
+  </section>
+
+  <div id="sheet" class="hidden"><div class="sheet-panel" id="sheetPanel"></div></div>
+  <div id="modal" class="modal hidden"></div>
+  <div id="toasts"></div>
+  <input type="file" id="fileInput" accept="audio/*,.mp3,.m4a,.aac,.flac,.wav,.ogg,.opus" multiple hidden>
+
+  <script src="icons.js"></script>
+  <script src="eq.js"></script>
+  <script src="jsmediatags.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
