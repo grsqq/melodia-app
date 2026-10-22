@@ -569,9 +569,9 @@ VIEWS.settings = (el) => {
       <div class="setting" id="storageRow"><div class="sd"><b>Хранилище</b><span>Проверяю…</span></div></div>
       ${allTracks.length ? `<div class="setting"><div class="sd"><b>Удалить всю музыку</b><span>Плейлисты останутся пустыми</span></div><button class="btn ghost small danger" data-act="wipe">Удалить</button></div>` : ''}
     </div>
-    <div class="panel"><h3>Как установить на телефон</h3>
+    ${native ? '' : `<div class="panel"><h3>Как установить на телефон</h3>
       <p class="hint"><b>iPhone:</b> открой эту страницу в Safari → кнопка «Поделиться» → «На экран Домой».<br><b>Android:</b> в Chrome меню ⋮ → «Установить приложение» (или «Добавить на гл. экран»).<br>После этого Melodia открывается с иконки и работает без интернета.</p>
-    </div>
+    </div>`}
     <p class="hint center">Melodia · вся музыка и плейлисты хранятся только на этом телефоне</p>
   </div>`;
   if (navigator.storage && navigator.storage.estimate) {
@@ -664,7 +664,7 @@ const player = {
     queue.manual = [];
     closeFull();
     if ('mediaSession' in navigator) { navigator.mediaSession.metadata = null; navigator.mediaSession.playbackState = 'none'; }
-    updatePlayButton(); updateNowPlaying(); markPlaying();
+    updatePlayButton(); updateNowPlaying(); markPlaying(); syncNative();
   },
 };
 
@@ -708,6 +708,7 @@ function updateNowPlaying() {
     navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist, album: t.album || '', artwork: c ? [{ src: c, sizes: '512x512' }] : [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] });
   }
   if (fullOpen()) renderNext();
+  syncNative();
 }
 function updateModeButtons() {
   const s = lib.settings;
@@ -801,6 +802,65 @@ if ('mediaSession' in navigator) {
   set('seekto', (d) => { if (d.seekTime != null) audio.currentTime = d.seekTime; });
   set('seekbackward', (d) => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); });
   set('seekforward', (d) => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (d.seekOffset || 10)); });
+}
+
+// ------------------------------------------------------------ Android app bridge
+// Inside the Android app (android-app/) the system media notification, lock screen and headset
+// buttons are driven from here; in a browser (iPhone) window.MelodiaAndroid doesn't exist.
+const native = window.MelodiaAndroid || null;
+const nativeCovers = new Map(); // cover key -> small JPEG data URL for the notification
+let nativeCoverKey = null, nativeActive = false;
+function smallCover(t) {
+  const key = t && t.cover;
+  if (!key || !coverOf(t)) return Promise.resolve('');
+  if (nativeCovers.has(key)) return Promise.resolve(nativeCovers.get(key));
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = c.height = 320;
+      const s = Math.min(img.width, img.height);
+      c.getContext('2d').drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 320, 320);
+      const url = c.toDataURL('image/jpeg', 0.85);
+      nativeCovers.set(key, url); res(url);
+    };
+    img.onerror = () => res('');
+    img.src = coverOf(t);
+  });
+}
+async function syncNative() {
+  if (!native) return;
+  const t = player.current;
+  // The notification appears once something has really been played, not for the restored last track.
+  if (!t || !audio.getAttribute('src')) { if (nativeActive && !t) { nativeActive = false; nativeCoverKey = null; native.stop(); } return; }
+  const cover = await smallCover(t);
+  if (player.current !== t) return;
+  const key = t.cover || '';
+  native.update(JSON.stringify({
+    title: t.title, artist: (t.artist || '').trim() || 'Неизвестный исполнитель', playing: player.playing,
+    position: audio.currentTime || 0, duration: isFinite(audio.duration) ? audio.duration : t.duration || 0,
+    coverKey: key, cover: key === nativeCoverKey ? '' : cover,
+  }));
+  nativeActive = true; nativeCoverKey = key;
+}
+if (native) {
+  ['play', 'pause', 'seeked', 'durationchange'].forEach((ev) => audio.addEventListener(ev, syncNative));
+  window.melodiaCommand = (cmd) => {
+    if (cmd === 'toggle') player.toggle();
+    else if (cmd === 'play') { if (audio.paused) player.toggle(); }
+    else if (cmd === 'pause') { if (!audio.paused) audio.pause(); }
+    else if (cmd === 'next') player.next();
+    else if (cmd === 'prev') player.prev();
+    else if (cmd.startsWith('seek:')) { audio.currentTime = +cmd.slice(5) || 0; }
+  };
+  // Android back button: true when the app handled it, false to send the app to the background.
+  window.melodiaBack = () => {
+    if (sheetOpen()) { closeSheet(); return true; }
+    if (!$('#modal').classList.contains('hidden')) { closeModal(); return true; }
+    if (fullOpen()) { closeFull(true); return true; }
+    if (state.stack.length > 1) { state.stack.pop(); render(); return true; }
+    if (state.tab !== 'home') { goTab('home'); return true; }
+    return false;
+  };
 }
 
 // ============================================================ sheets & dialogs
@@ -991,5 +1051,5 @@ document.addEventListener('change', (e) => {
   }
   updateNowPlaying();
   render();
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol !== 'file:' && !native) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
