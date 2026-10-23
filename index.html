@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <div id="tint"></div>
   <div id="ambient"></div>
 
   <header id="top">
@@ -28,8 +29,9 @@
   <div id="mini" class="hidden">
     <div class="mini-progress"><div class="fill"></div></div>
     <div class="mini-cover" id="miniCover"></div>
-    <div class="mini-meta"><div class="tt" id="miniTitle"></div><div class="st" id="miniArtist"></div></div>
+    <div class="mini-meta"><div class="tt mq-box" id="miniTitle"></div><div class="st" id="miniArtist"></div></div>
     <button class="icon-btn" id="miniLike" aria-label="Любимое"><span data-icon="heart"></span></button>
+    <button class="icon-btn" id="miniPrev" aria-label="Назад"><span data-icon="prev"></span></button>
     <button class="icon-btn" id="miniPlay" aria-label="Играть"><span data-icon="play"></span></button>
     <button class="icon-btn" id="miniNext" aria-label="Далее"><span data-icon="next"></span></button>
     <button class="icon-btn mini-close" id="miniClose" aria-label="Закрыть плеер"><span data-icon="close"></span></button>
@@ -47,7 +49,7 @@
       </div>
       <div class="full-cover" id="fullCover"></div>
       <div class="full-meta">
-        <div class="tx"><div class="tt" id="fullTitle"></div><div class="st" id="fullArtist"></div></div>
+        <div class="tx"><div class="tt mq-box" id="fullTitle"></div><div class="st" id="fullArtist"></div></div>
         <button class="icon-btn likebtn" id="fullLike" aria-label="Любимое"><span data-icon="heart"></span></button>
       </div>
       <div class="slider" id="seek"><div class="fill"></div><div class="knob"></div></div>

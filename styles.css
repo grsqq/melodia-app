@@ -271,3 +271,45 @@ body.full-open #toasts { bottom: calc(var(--safe-b) + 24px); }
 #mini .mini-close { width: 34px; margin-left: -4px; }
 #mini .mini-close .ic { width: 20px; height: 20px; }
 .filter input::placeholder { color: var(--dim); opacity: 1; }
+
+/* mini player: back button, narrower buttons so the title keeps room */
+#mini { gap: 4px; }
+#mini .mini-cover { margin-right: 6px; }
+#mini .icon-btn { width: 36px; height: 36px; }
+#mini .icon-btn .ic { width: 22px; height: 22px; }
+#mini #miniPlay .ic { width: 26px; height: 26px; }
+#mini .mini-close { width: 28px; margin-left: 0; }
+
+/* a title that doesn't fit scrolls like a ticker */
+.mq-box { text-overflow: clip !important; }
+.mq-box .mq { display: inline-block; white-space: nowrap; }
+.mq-box .mq i { display: inline-block; }
+.mq-box.run { -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 18px), transparent 100%); mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 18px), transparent 100%); }
+.mq-box.run .mq { animation: mq var(--mq-t, 10s) linear infinite; }
+@keyframes mq { 0%, 22% { transform: translateX(0); } 100% { transform: translateX(calc(-1 * var(--mq-d, 0px))); } }
+
+/* the background takes on a little of the cover's colour */
+#tint { position: fixed; inset: 0; z-index: -1; pointer-events: none; opacity: 0; transition: opacity 1.2s, background-color 1.6s ease;
+  -webkit-mask-image: radial-gradient(120% 75% at 50% 0%, #000 0%, rgba(0,0,0,.55) 55%, rgba(0,0,0,.25) 100%); mask-image: radial-gradient(120% 75% at 50% 0%, #000 0%, rgba(0,0,0,.55) 55%, rgba(0,0,0,.25) 100%); }
+#tint.on { opacity: .30; }
+body.no-ambient #tint { display: none; }
+
+/* add-music sheet with descriptions */
+.sheet-panel button[data-m] .mt { display: flex; flex-direction: column; min-width: 0; padding: 8px 0; line-height: 1.25; }
+.sheet-panel button[data-m] .mt small { font-size: 12.5px; color: var(--sub); margin-top: 2px; }
+.sheet-panel button[data-m]:has(.mt) { height: auto; min-height: 64px; }
+
+/* folders in settings */
+.setting.folder .cv { width: 40px; height: 40px; }
+.setting.folder .icon-btn { width: 36px; height: 36px; }
+
+/* own colour picker (Android) */
+.picker { padding: 4px 14px 10px; }
+.picker-preview { width: 72px; height: 72px; border-radius: 50%; margin: 2px auto 12px; border: 2px solid #fff; box-shadow: 0 0 0 3px var(--accent); }
+.picker-label { font-size: 13px; color: var(--sub); margin: 10px 0 2px; }
+.slider.pk { height: 40px; }
+.slider.pk::before { display: none; }
+.pk-track { position: absolute; left: 0; right: 0; top: 50%; height: 14px; margin-top: -7px; border-radius: 7px; }
+.pk-track.hue { background: linear-gradient(90deg, hsl(0,70%,45%), hsl(60,70%,45%), hsl(120,70%,40%), hsl(180,70%,40%), hsl(240,70%,50%), hsl(300,70%,45%), hsl(359,70%,45%)); }
+.slider.pk .knob { width: 26px; height: 26px; margin: -13px 0 0 -13px; border: 3px solid #fff; background: transparent; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+.sheet-panel button.pk-done { justify-content: center; font-weight: 600; background: rgba(255,255,255,.1); margin-top: 6px; }

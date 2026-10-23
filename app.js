@@ -1,7 +1,9 @@
 'use strict';
 /* global icon, hydrateIcons, Equalizer, EQ_FREQS, EQ_PRESETS, jsmediatags */
-// Melodia for phones: an offline player. Music is imported from the phone's files and kept
-// inside the app (IndexedDB), so it plays without internet and survives restarts.
+// Melodia for phones: an offline player. On iPhone music is imported from the phone's files and
+// kept inside the app (IndexedDB). In the Android app it lives outside the WebView (see
+// android-app MusicStore): picked folders are played in place, single files are copied into the
+// app, so the library is limited only by the phone's free space.
 
 // ============================================================ helpers
 const $ = (s, r = document) => r.querySelector(s);
@@ -47,6 +49,7 @@ const db = {
   },
   get: (s, k) => db.run(s, 'readonly', (st) => st.get(k)),
   put: (s, k, v) => db.run(s, 'readwrite', (st) => { st.put(v, k); }),
+  putMany: (s, pairs) => db.run(s, 'readwrite', (st) => { for (const [k, v] of pairs) st.put(v, k); }),
   del: (s, k) => db.run(s, 'readwrite', (st) => { st.delete(k); }),
   async entries(s) {
     const d = await this.open();
@@ -78,6 +81,47 @@ function applyTheme(th) {
   for (const [n, v] of Object.entries(vars)) document.documentElement.style.setProperty(n, v);
   document.body.classList.toggle('no-ambient', !th.ambient);
   $('meta[name="theme-color"]').content = `hsl(${h}, ${Math.min(100, 30 * k)}%, 22%)`;
+  if (window.MelodiaAndroid && MelodiaAndroid.theme) MelodiaAndroid.theme(hslToHex(h, Math.min(100, 28 * k), 20));
+}
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const f = (n) => { const k = (n + h / 30) % 12; const c = l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1)); return Math.round(c * 255).toString(16).padStart(2, '0'); };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+// The background takes on a little of the playing track's cover colour.
+const coverTints = new Map(); // cover url -> 'r, g, b' or ''
+function coverTint(url) {
+  if (coverTints.has(url)) return Promise.resolve(coverTints.get(url));
+  return new Promise((res) => {
+    const img = new Image();
+    img.onload = () => {
+      let out = '';
+      try {
+        const c = document.createElement('canvas'); c.width = c.height = 24;
+        const x = c.getContext('2d', { willReadFrequently: true });
+        x.drawImage(img, 0, 0, 24, 24);
+        const d = x.getImageData(0, 0, 24, 24).data;
+        // Average weighted towards saturated, mid-bright pixels, so a grey frame doesn't win.
+        let r = 0, g = 0, b = 0, w = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const mx = Math.max(d[i], d[i + 1], d[i + 2]), mn = Math.min(d[i], d[i + 1], d[i + 2]);
+          const wt = 0.05 + ((mx - mn) / 255) ** 2 * (mx > 30 && mn < 235 ? 1 : 0.1);
+          r += d[i] * wt; g += d[i + 1] * wt; b += d[i + 2] * wt; w += wt;
+        }
+        out = `${Math.round(r / w)}, ${Math.round(g / w)}, ${Math.round(b / w)}`;
+      } catch { /* unreadable image */ }
+      coverTints.set(url, out); res(out);
+    };
+    img.onerror = () => { coverTints.set(url, ''); res(''); };
+    img.src = url;
+  });
+}
+async function updateTint(t) {
+  const c = coverOf(t);
+  const rgb = c ? await coverTint(c) : '';
+  if (player.current !== t) return;
+  const el = $('#tint');
+  if (rgb) { el.style.backgroundColor = `rgb(${rgb})`; el.classList.add('on'); } else el.classList.remove('on');
 }
 function hexToHueSat(hex) {
   const n = parseInt(hex.slice(1), 16), r = (n >> 16) / 255, g = ((n >> 8) & 255) / 255, b = (n & 255) / 255;
@@ -97,6 +141,8 @@ const DEFAULT_LIB = {
   liked: [],       // track ids
   recent: [],      // track ids
   recentLists: [], // list contexts
+  folders: [],     // Android: picked folders { uri, name, added }
+  excluded: [],    // Android: uris of folder tracks removed by hand (a rescan doesn't bring them back)
   settings: {
     shuffle: false, repeat: 'off', sort: 'added',
     eq: { enabled: false, preset: 'Ровный', gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], preamp: 0 },
@@ -192,6 +238,12 @@ function fromFileName(name) {
   const m = base.match(/^(?:\d{1,3}[.\s-]+)?(.+?)\s+[-–—]\s+(.+)$/);
   return m ? { artist: m[1].trim(), title: m[2].trim() } : { artist: '', title: base };
 }
+// Old Russian mp3s keep tags in cp1251, which readers show as «Ïåñíÿ»: turn those back into Cyrillic.
+function fixText(x) {
+  x = String(x || '').trim();
+  if (!/[\u00c0-\u00ff]{3}/.test(x) || /[^\u0000-\u00ff]/.test(x)) return x;
+  return x.replace(/[\u00a8\u00b8\u00c0-\u00ff]/g, (ch) => { const n = ch.charCodeAt(0); return n === 0xa8 ? 'Ё' : n === 0xb8 ? 'ё' : String.fromCharCode(0x410 + n - 0xc0); });
+}
 function hashBytes(bytes) {
   let h = 2166136261;
   const step = Math.max(1, Math.floor(bytes.length / 4096));
@@ -219,7 +271,7 @@ async function importFiles(files, playlist) {
       const guess = fromFileName(f.name);
       const t = {
         id: uid(), name: f.name, size: f.size, type: f.type || '',
-        title: (tags.title || guess.title || f.name).trim(), artist: (tags.artist || guess.artist || '').trim(), album: (tags.album || '').trim(),
+        title: fixText(tags.title) || guess.title || f.name, artist: fixText(tags.artist) || guess.artist || '', album: fixText(tags.album),
         duration: await readDuration(f), added: Date.now() + i, cover: '',
       };
       const pic = tags.picture;
@@ -261,12 +313,128 @@ function showProgress(total) {
   };
 }
 let importTarget = null;
-function pickFiles(playlist) { importTarget = playlist || null; $('#fileInput').value = ''; $('#fileInput').click(); }
+function pickFiles(playlist) {
+  if (nativeFiles) return chooseImport(playlist);
+  importTarget = playlist || null; $('#fileInput').value = ''; $('#fileInput').click();
+}
+
+// ------------------------------------------------------------ import in the Android app
+// The Java side reads tags and covers itself and reports back through melodiaImportEvent():
+// picked (a folder was chosen) → progress… → tracks (batches) → done.
+const nativeFiles = !!(window.MelodiaAndroid && window.MelodiaAndroid.pickFolder);
+const mediaUrl = (t) => (t.src === 'file' ? '/media/f/' + encodeURIComponent(t.file) : `/media/l?u=${encodeURIComponent(t.uri)}&n=${encodeURIComponent(t.name || '')}`);
+const nativeCoverUrl = (key) => `/media/c/${key.slice(2)}.jpg`;
+function chooseImport(playlist) {
+  openSheet(`<div class="sheet-title">Добавить музыку</div>
+    <button data-m="folder">${icon('folder')}<span class="mt"><b>Папку с телефона</b><small>Все треки из папки и подпапок, без копирования. Новые файлы из неё появятся сами</small></span></button>
+    <button data-m="files">${icon('upload')}<span class="mt"><b>Отдельные файлы</b><small>Копируются в Melodia — будут играть, даже если удалить оригинал</small></span></button>`, (m) => {
+    if (m === 'folder') startNative({ kind: 'folder', playlist }, () => MelodiaAndroid.pickFolder());
+    if (m === 'files') startNative({ kind: 'files', playlist }, () => MelodiaAndroid.pickFiles(JSON.stringify(allTracks.map((t) => `${t.name}|${t.size}`))));
+  });
+}
+const nativeJobs = []; // waiting jobs; the first one is running
+function startNative(job, run) {
+  if (importing && !nativeJobs.length) return toast('Подожди, предыдущие файлы ещё добавляются');
+  Object.assign(job, { run, added: [], chain: Promise.resolve(), bar: null });
+  nativeJobs.push(job);
+  if (nativeJobs.length === 1) { importing = true; job.run(); }
+}
+function scanFolder(f, quiet, playlist) {
+  startNative({ kind: 'folder', folder: f.uri, name: f.name, quiet, playlist }, () => MelodiaAndroid.scanFolder(f.uri, JSON.stringify(knownKeys())));
+}
+const knownKeys = () => [...allTracks.flatMap((t) => (t.uri ? [t.uri, `${t.name}|${t.size}`] : [`${t.name}|${t.size}`])), ...lib.excluded];
+function nextNative() {
+  nativeJobs.shift();
+  if (nativeJobs.length) nativeJobs[0].run(); else importing = false;
+}
+// Android joins several artists with "/": «zetuv/Dead Nation» → «zetuv, Dead Nation» (but AC/DC stays).
+const joinArtists = (a) => { const p = a.split('/'); return p.length > 1 && p.every((x) => x.trim().length >= 3) ? p.map((x) => x.trim()).join(', ') : a; };
+async function addNativeTracks(items, job) {
+  const ts = items.map((x, k) => {
+    const guess = fromFileName(x.name);
+    return {
+      id: uid(), name: x.name, size: x.size, type: x.mime || '',
+      title: fixText(x.title) || guess.title || x.name, artist: joinArtists(fixText(x.artist)) || guess.artist || '', album: fixText(x.album),
+      duration: Math.round(x.duration || 0), added: Date.now() + job.added.length + k, cover: x.cover ? 'n-' + x.cover : '',
+      src: x.src, file: x.file, uri: x.uri, folder: x.folder,
+    };
+  });
+  await db.putMany('tracks', ts.map((t) => [t.id, t]));
+  for (const t of ts) {
+    if (t.cover) coverUrls.set(t.cover, nativeCoverUrl(t.cover));
+    allTracks.unshift(t); byId.set(t.id, t);
+  }
+  job.added.push(...ts);
+}
+window.melodiaImportEvent = (json) => {
+  const e = JSON.parse(json);
+  const job = nativeJobs[0];
+  if (!job) return;
+  if (e.ev === 'picked') {
+    let f = lib.folders.find((x) => x.uri === e.uri);
+    if (!f) { f = { uri: e.uri, name: e.name, added: Date.now() }; lib.folders.push(f); }
+    lib.excluded = lib.excluded.filter((u) => !u.startsWith(e.uri + '/')); // picked again: bring everything back
+    save();
+    Object.assign(job, { folder: e.uri, name: f.name });
+    MelodiaAndroid.scanFolder(e.uri, JSON.stringify(knownKeys()));
+  } else if (e.ev === 'progress') {
+    if (!job.bar) job.bar = showProgress(e.total);
+    job.bar(e.i, e.name);
+  } else if (e.ev === 'tracks') {
+    job.chain = job.chain.then(() => addNativeTracks(e.items, job)).catch((err) => { job.error = err.message; });
+  } else if (e.ev === 'done') {
+    job.chain.then(() => finishNative(job, e)).catch(() => {}).finally(nextNative);
+  }
+};
+async function finishNative(job, e) {
+  if (job.bar) job.bar(Infinity);
+  if (e.error === 'cancel') return;
+  if (e.error) {
+    const where = job.name ? ` «${job.name}»` : '';
+    toast(e.error === 'noaccess' ? `Нет доступа к папке${where}. Добавь её заново: Настройки → Музыка` : `Не удалось прочитать музыку${where}`, 'err');
+    return;
+  }
+  let removed = 0;
+  const target = job.playlist ? getPlaylist(job.playlist.id) : null;
+  if (job.kind === 'folder' && e.present) {
+    // Files deleted from the folder leave the library too (unless the folder looks unplugged).
+    const uris = new Set(e.present.map((x) => x[0]));
+    const gone = allTracks.filter((t) => t.folder === job.folder && !uris.has(t.uri));
+    if (gone.length && uris.size) { await deleteTracks(gone, true); removed = gone.length; }
+    if (target) {
+      const keys = new Set(e.present.map((x) => x[1]));
+      addToPlaylist(target, allTracks.filter((t) => uris.has(t.uri) || keys.has(`${t.name}|${t.size}`)).reverse());
+    }
+  } else if (target && job.added.length) addToPlaylist(target, job.added);
+  const n = job.added.length;
+  if (job.quiet && !n && !removed) return;
+  const parts = [n ? `Добавлено ${tracksWord(n)}` : job.kind === 'folder' ? (e.present && e.present.length ? 'Новых треков нет' : 'В папке нет музыки') : 'Новых треков нет'];
+  if (n && job.kind === 'folder' && job.name && !job.quiet) parts[0] += ` из «${job.name}»`;
+  if (removed) parts.push(`${removed} ${plural(removed, 'файл пропал', 'файла пропали', 'файлов пропали')} из папки`);
+  if (e.skipped) parts.push(`${e.skipped} уже были`);
+  if (e.failed) parts.push(`${e.failed} не удалось прочитать`);
+  toast(parts.join(' · '), n ? 'ok' : '');
+  if (e.noSpace) toast('На телефоне закончилось место — часть файлов не добавлена', 'err');
+  render();
+}
+function removeFolder(f) {
+  return confirm2('Убрать папку?', `Треки из «${f.name}» пропадут из Melodia и плейлистов. Сами файлы останутся на телефоне.`, 'Убрать').then(async (ok) => {
+    if (!ok) return;
+    await deleteTracks(allTracks.filter((t) => t.folder === f.uri), true);
+    lib.folders = lib.folders.filter((x) => x !== f);
+    lib.excluded = lib.excluded.filter((u) => !u.startsWith(f.uri + '/'));
+    MelodiaAndroid.forgetFolder(f.uri);
+    save(); render(); toast('Папка убрана');
+  });
+}
 $('#fileInput').addEventListener('change', (e) => { const f = e.target.files; if (f && f.length) importFiles(f, importTarget); });
 
-async function deleteTracks(tracks) {
+// forget: folder tracks that left with their folder, so they aren't remembered as removed by hand.
+async function deleteTracks(tracks, forget = false) {
   for (const t of tracks) {
-    await db.del('audio', t.id);
+    if (t.src === 'file') MelodiaAndroid.deleteFile(t.file);
+    else if (t.src === 'link') { if (!forget && !lib.excluded.includes(t.uri)) lib.excluded.push(t.uri); }
+    else await db.del('audio', t.id);
     await db.del('tracks', t.id);
     byId.delete(t.id);
   }
@@ -279,7 +447,12 @@ async function deleteTracks(tracks) {
   if (player.current && gone.has(player.current.id)) player.close();
   // Covers nobody uses any more are removed too.
   const used = new Set(allTracks.map((t) => t.cover).filter(Boolean));
-  for (const key of [...coverUrls.keys()]) if (!used.has(key)) { URL.revokeObjectURL(coverUrls.get(key)); coverUrls.delete(key); db.del('covers', key).catch(() => {}); }
+  for (const key of [...coverUrls.keys()]) {
+    if (used.has(key)) continue;
+    if (key.startsWith('n-')) MelodiaAndroid.deleteCover(key.slice(2));
+    else { URL.revokeObjectURL(coverUrls.get(key)); db.del('covers', key).catch(() => {}); }
+    coverUrls.delete(key);
+  }
   save();
 }
 
@@ -412,7 +585,8 @@ const VIEWS = {};
 
 function emptyHtml() {
   return `<div class="empty">${icon('note')}<h3>Добавь свою музыку</h3>
-    <p>Скинь mp3, m4a или flac на телефон (из Telegram, с компьютера, из «Файлов») и выбери их здесь. Музыка сохранится внутри Melodia и будет играть без интернета.</p>
+    <p>${nativeFiles ? 'Выбери папку с музыкой на телефоне — Melodia подтянет все треки из неё и подпапок. Или добавь отдельные mp3, m4a, flac. Всё играет без интернета.'
+      : 'Скинь mp3, m4a или flac на телефон (из Telegram, с компьютера, из «Файлов») и выбери их здесь. Музыка сохранится внутри Melodia и будет играть без интернета.'}</p>
     <button class="btn green" data-act="import">${icon('upload')}Добавить музыку</button></div>`;
 }
 
@@ -600,12 +774,17 @@ VIEWS.settings = (el) => {
     <div class="panel"><h3>Оформление</h3>
       <div class="swatches">
         ${THEMES.map(([id, name, hue, sat]) => `<button class="swatch ${th.id === id ? 'on' : ''}" data-theme="${id}"><span class="dot" style="${themeSwatch(hue, sat)}"></span>${name}</button>`).join('')}
-        <label class="swatch ${th.id === 'custom' ? 'on' : ''}"><span class="dot ${th.id === 'custom' ? '' : 'custom'}" style="${th.id === 'custom' ? themeSwatch(th.hue, th.sat) : ''}"><input type="color" id="themeColor" value="${esc(th.color || '#3a7d6a')}"></span>Свой</label>
+        ${nativeFiles
+          // Android's WebView only has a crude 8-colour dialog for <input type=color>, so the app has its own picker.
+          ? `<button class="swatch ${th.id === 'custom' ? 'on' : ''}" data-act="colorpicker"><span class="dot ${th.id === 'custom' ? '' : 'custom'}" style="${th.id === 'custom' ? themeSwatch(th.hue, th.sat) : ''}"></span>Свой</button>`
+          : `<label class="swatch ${th.id === 'custom' ? 'on' : ''}"><span class="dot ${th.id === 'custom' ? '' : 'custom'}" style="${th.id === 'custom' ? themeSwatch(th.hue, th.sat) : ''}"><input type="color" id="themeColor" value="${esc(th.color || '#3a7d6a')}"></span>Свой</label>`}
       </div>
       <div class="setting" data-act="ambienttoggle"><div class="sd"><b>Фон из обложки трека</b><span>Цвета обложки мягко проступают на фоне</span></div><div class="switch ${th.ambient ? 'on' : ''}"></div></div>
     </div>
     <div class="panel"><h3>Музыка</h3>
-      <div class="setting"><div class="sd"><b>${tracksWord(allTracks.length)}</b><span>Занимают ${fmtSize(total)} в памяти телефона</span></div><button class="btn small" data-act="import">${icon('upload')}Добавить</button></div>
+      <div class="setting"><div class="sd"><b>${tracksWord(allTracks.length)}</b><span>${nativeFiles ? musicSummary() : `Занимают ${fmtSize(total)} в памяти телефона`}</span></div><button class="btn small" data-act="import">${icon('upload')}Добавить</button></div>
+      ${nativeFiles ? lib.folders.map((f) => `<div class="setting folder"><div class="cv">${icon('folder')}</div><div class="sd"><b>${esc(f.name)}</b><span>${tracksWord(allTracks.filter((t) => t.folder === f.uri).length)}</span></div><button class="icon-btn" data-delfolder="${esc(f.uri)}" aria-label="Убрать папку">${icon('close')}</button></div>`).join('')
+        + (lib.folders.length ? `<div class="row"><button class="btn ghost small" data-act="rescan">${icon('repeat')}Обновить папки</button></div>` : '') : ''}
       <div class="setting" id="storageRow"><div class="sd"><b>Хранилище</b><span>Проверяю…</span></div></div>
       ${allTracks.length ? `<div class="setting"><div class="sd"><b>Удалить всю музыку</b><span>Плейлисты останутся пустыми</span></div><button class="btn ghost small danger" data-act="wipe">Удалить</button></div>` : ''}
     </div>
@@ -614,13 +793,51 @@ VIEWS.settings = (el) => {
     </div>`}
     <p class="hint center">Melodia · вся музыка и плейлисты хранятся только на этом телефоне</p>
   </div>`;
-  if (navigator.storage && navigator.storage.estimate) {
+  if (nativeFiles) {
+    const st = JSON.parse(MelodiaAndroid.storage() || '{}');
+    $('#storageRow span').textContent = st.total ? `Свободно ${fmtSize(st.free)} из ${fmtSize(st.total)} — сколько места на телефоне, столько и музыки` : '';
+  } else if (navigator.storage && navigator.storage.estimate) {
     Promise.all([navigator.storage.estimate(), navigator.storage.persisted ? navigator.storage.persisted() : false]).then(([est, kept]) => {
       const row = $('#storageRow span');
       if (row) row.textContent = `Свободно примерно ${fmtSize(Math.max(0, (est.quota || 0) - (est.usage || 0)))}${kept ? ' · музыка защищена от автоочистки' : ''}`;
     }).catch(() => {});
   }
 };
+
+function musicSummary() {
+  const copied = allTracks.filter((t) => t.src !== 'link').reduce((a, t) => a + (t.size || 0), 0);
+  const linked = allTracks.filter((t) => t.src === 'link').length;
+  const parts = [];
+  if (linked) parts.push(`${tracksWord(linked)} играют из папок`);
+  if (copied || !linked) parts.push(`${fmtSize(copied)} скопировано в Melodia`);
+  return parts.join(' · ');
+}
+
+// Own colour picker (Android): hue and intensity sliders, the theme follows live.
+function colorPicker() {
+  const th = lib.settings.theme;
+  let hue = th.id === 'custom' ? th.hue : 200, sat = th.id === 'custom' ? th.sat : 0.9;
+  const SAT_MIN = 0.08, SAT_MAX = 1.3;
+  openSheet(`<div class="sheet-title">Свой цвет</div>
+    <div class="picker">
+      <div class="picker-preview" id="pkPreview"></div>
+      <div class="picker-label">Оттенок</div>
+      <div class="slider pk" id="pkHue"><div class="pk-track hue"></div><div class="knob"></div></div>
+      <div class="picker-label">Насыщенность</div>
+      <div class="slider pk" id="pkSat"><div class="pk-track" id="pkSatTrack"></div><div class="knob"></div></div>
+    </div>
+    <button data-m="done" class="pk-done">${icon('check')}Готово</button>`, () => { if (view().name === 'settings') render(); });
+  const draw = () => {
+    $('#pkPreview').setAttribute('style', themeSwatch(hue, sat));
+    $('#pkHue .knob').style.left = (hue / 360) * 100 + '%';
+    $('#pkSat .knob').style.left = ((sat - SAT_MIN) / (SAT_MAX - SAT_MIN)) * 100 + '%';
+    $('#pkSatTrack').style.background = `linear-gradient(90deg, hsl(${hue}, 4%, 40%), hsl(${hue}, 40%, 40%), hsl(${hue}, 80%, 42%))`;
+    setTheme({ id: 'custom', hue, sat, color: hslToHex(hue, Math.min(100, 30 * sat), 45) });
+  };
+  makeSlider($('#pkHue'), (p) => { hue = Math.round(p * 359); draw(); });
+  makeSlider($('#pkSat'), (p) => { sat = SAT_MIN + p * (SAT_MAX - SAT_MIN); draw(); });
+  draw();
+}
 
 // ============================================================ queue & player
 const queue = {
@@ -657,12 +874,15 @@ const player = {
     updateNowPlaying(); markPlaying();
     try {
       if (lib.settings.eq.enabled) { eq.init(); eq.resume(); }
-      const blob = await db.get('audio', track.id);
-      if (token !== this.token) return;
-      if (!blob) throw new Error('файл не найден в памяти');
-      if (audioUrl) URL.revokeObjectURL(audioUrl);
-      audioUrl = URL.createObjectURL(blob);
-      audio.src = audioUrl;
+      if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
+      if (track.src === 'file' || track.src === 'link') audio.src = mediaUrl(track);
+      else {
+        const blob = await db.get('audio', track.id);
+        if (token !== this.token) return;
+        if (!blob) throw new Error('файл не найден в памяти');
+        audioUrl = URL.createObjectURL(blob);
+        audio.src = audioUrl;
+      }
       await audio.play();
       this.errors = 0;
       pushRecent(track);
@@ -670,7 +890,7 @@ const player = {
       if (token !== this.token || e.name === 'AbortError') return;
       if (e.name === 'NotAllowedError') { this.loading = false; updatePlayButton(); return; } // autoplay blocked: wait for a tap
       this.loading = false; updatePlayButton();
-      toast(`«${track.title}» не играет: ${e.message || 'формат не поддерживается'}`, 'err');
+      toast(track.src === 'link' && e.name === 'NotSupportedError' ? `«${track.title}» не играет: файла нет в папке или формат не поддерживается` : `«${track.title}» не играет: ${e.message || 'формат не поддерживается'}`, 'err');
       if (++this.errors < 5) setTimeout(() => { if (this.current === track) this.next(true); }, 1200);
     } finally {
       if (token === this.token) { this.loading = false; updatePlayButton(); }
@@ -729,18 +949,19 @@ function updateNowPlaying() {
   const t = player.current;
   document.body.classList.toggle('has-player', !!t);
   $('#mini').classList.toggle('hidden', !t);
-  if (!t) { $('#ambient').classList.remove('on'); document.title = 'Melodia'; return; }
+  if (!t) { $('#ambient').classList.remove('on'); $('#tint').classList.remove('on'); document.title = 'Melodia'; return; }
   const c = coverOf(t);
   const artist = (t.artist || '').trim() || 'Неизвестный исполнитель';
-  $('#miniTitle').textContent = t.title;
+  marquee($('#miniTitle'), t.title);
   $('#miniArtist').textContent = artist;
-  $('#fullTitle').textContent = t.title;
+  marquee($('#fullTitle'), t.title);
   $('#fullArtist').textContent = artist;
   $('#fullFrom').textContent = queue.ctx && ctxTitle(queue.ctx) ? ctxTitle(queue.ctx) : 'Сейчас играет';
   for (const el of [$('#miniCover'), $('#fullCover')]) { el.style.backgroundImage = c ? `url('${c}')` : ''; el.innerHTML = c ? '' : icon('note'); }
   $('#fullBg').style.backgroundImage = c ? `url('${c}')` : '';
   const amb = $('#ambient');
   if (c) { amb.style.backgroundImage = `url('${c}')`; amb.classList.add('on'); } else amb.classList.remove('on');
+  updateTint(t);
   const liked = isLiked(t);
   for (const b of [$('#miniLike'), $('#fullLike')]) { b.classList.toggle('on', liked); b.innerHTML = icon(liked ? 'heartFill' : 'heart'); }
   document.title = `${t.title} · ${artist}`;
@@ -750,6 +971,29 @@ function updateNowPlaying() {
   if (fullOpen()) renderNext();
   syncNative();
 }
+// A title that doesn't fit runs along like a news ticker (pause, scroll, repeat).
+function marquee(el, text) {
+  if (el.dataset.text === text && el.firstElementChild) return;
+  el.dataset.text = text;
+  el.innerHTML = `<span class="mq">${esc(text)}</span>`;
+  requestAnimationFrame(() => fitMarquee(el));
+}
+function fitMarquee(el) {
+  const span = el.firstElementChild;
+  if (!span || !el.clientWidth) return;
+  const text = el.dataset.text;
+  const plain = `<span class="mq">${esc(text)}</span>`;
+  if (el.classList.contains('run')) { el.classList.remove('run'); el.innerHTML = plain; }
+  const w = el.firstElementChild.scrollWidth;
+  if (w <= el.clientWidth + 1) return;
+  const gap = 48, dist = w + gap;
+  el.innerHTML = `<span class="mq">${esc(text)}<i style="width:${gap}px"></i>${esc(text)}</span>`;
+  el.style.setProperty('--mq-d', dist + 'px');
+  el.style.setProperty('--mq-t', (dist / 32 + 2.2).toFixed(1) + 's');
+  el.classList.add('run');
+}
+addEventListener('resize', () => { for (const id of ['miniTitle', 'fullTitle']) fitMarquee($('#' + id)); });
+
 function updateModeButtons() {
   const s = lib.settings;
   $('#shuffleBtn').classList.toggle('on', s.shuffle);
@@ -817,6 +1061,7 @@ $('#nextBtn').onclick = () => player.next();
 $('#prevBtn').onclick = () => player.prev();
 $('#miniPlay').onclick = (e) => { e.stopPropagation(); player.toggle(); };
 $('#miniNext').onclick = (e) => { e.stopPropagation(); player.next(); };
+$('#miniPrev').onclick = (e) => { e.stopPropagation(); player.prev(); };
 $('#miniLike').onclick = (e) => { e.stopPropagation(); toggleLike(player.current); };
 $('#miniClose').onclick = (e) => { e.stopPropagation(); player.close(); };
 $('#fullLike').onclick = () => toggleLike(player.current);
@@ -885,7 +1130,8 @@ async function syncNative() {
 }
 if (native) {
   ['play', 'pause', 'seeked', 'durationchange'].forEach((ev) => audio.addEventListener(ev, syncNative));
-  window.melodiaCommand = (cmd) => {
+  window.melodiaCommand = async (cmd) => {
+    await booted; // a widget tap can open the app before the library is loaded
     if (cmd === 'toggle') player.toggle();
     else if (cmd === 'play') { if (audio.paused) player.toggle(); }
     else if (cmd === 'pause') { if (!audio.paused) audio.pause(); }
@@ -927,7 +1173,7 @@ function trackMenu(t, ctx, extra = []) {
     ${pl ? `<button data-m="remove">${icon('close')}Убрать из плейлиста</button>` : ''}
     ${base === 'recent' ? `<button data-m="unrecent">${icon('close')}Удалить из истории</button>` : ''}
     ${extra.map(([m, ic, label]) => `<button data-m="${m}">${icon(ic)}${label}</button>`).join('')}
-    <button data-m="delete" class="danger">${icon('trash')}Удалить с телефона</button>`, async (m) => {
+    <button data-m="delete" class="danger">${icon('trash')}${t.src === 'link' ? 'Убрать из Melodia' : 'Удалить с телефона'}</button>`, async (m) => {
     if (m === 'playnext') { queue.manual.unshift(t); toast('Сыграет следующим'); if (!player.current) player.next(); renderNext(); }
     else if (m === 'enqueue') { queue.manual.push(t); toast('Добавлено в очередь'); if (!player.current) player.next(); renderNext(); }
     else if (m === 'like') toggleLike(t);
@@ -936,8 +1182,9 @@ function trackMenu(t, ctx, extra = []) {
     else if (m === 'unrecent') { lib.recent = lib.recent.filter((id) => id !== t.id); save(); render(); }
     else if (m === 'close') player.close();
     else if (m === 'delete') {
-      if (!await confirm2('Удалить трек?', `«${t.title}» пропадёт из Melodia и всех плейлистов.`)) return;
-      await deleteTracks([t]); render(); toast('Трек удалён');
+      const link = t.src === 'link';
+      if (!await confirm2(link ? 'Убрать трек?' : 'Удалить трек?', link ? `«${t.title}» пропадёт из Melodia и всех плейлистов. Файл останется в папке на телефоне.` : `«${t.title}» пропадёт из Melodia и всех плейлистов.`, link ? 'Убрать' : 'Удалить')) return;
+      await deleteTracks([t]); render(); toast(link ? 'Трек убран' : 'Трек удалён');
     }
   });
 }
@@ -1014,6 +1261,8 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  const delFolder = t.closest('[data-delfolder]');
+  if (delFolder) { const f = lib.folders.find((x) => x.uri === delFolder.dataset.delfolder); if (f) removeFolder(f); return; }
   const sortChip = t.closest('[data-sort]'); if (sortChip) { lib.settings.sort = sortChip.dataset.sort; save(); return render(); }
   const th = t.closest('[data-theme]');
   if (th) { const [id, , hue, sat] = THEMES.find((x) => x[0] === th.dataset.theme); setTheme({ id, hue, sat }); return render(); }
@@ -1049,8 +1298,14 @@ document.addEventListener('click', async (e) => {
     case 'eqtoggle': if (lib.settings.eq.enabled) { lib.settings.eq.enabled = false; eq.apply(lib.settings.eq); } else enableEq(); save(); render(); break;
     case 'eqreset': Object.assign(lib.settings.eq, { preset: 'Ровный', gains: Array(10).fill(0), preamp: 0 }); eq.apply(lib.settings.eq); save(); render(); break;
     case 'eqsave': { const n = await prompt2('Название пресета', 'Мой пресет'); if (n) { lib.settings.eqCustom[n] = lib.settings.eq.gains.slice(); lib.settings.eq.preset = n; save(); render(); toast('Пресет сохранён', 'ok'); } break; }
+    case 'colorpicker': colorPicker(); break;
+    case 'rescan': if (!lib.folders.length) break; toast('Проверяю папки…'); lib.folders.forEach((f, i) => scanFolder(f, i < lib.folders.length - 1)); break;
     case 'ambienttoggle': setTheme({ ambient: !lib.settings.theme.ambient }); render(); break;
-    case 'wipe': if (await confirm2('Удалить всю музыку?', `Все ${tracksWord(allTracks.length)} пропадут с телефона. Плейлисты останутся пустыми.`)) { await deleteTracks(allTracks.slice()); render(); toast('Музыка удалена'); } break;
+    case 'wipe': if (await confirm2('Удалить всю музыку?', nativeFiles && lib.folders.length ? `Все ${tracksWord(allTracks.length)} пропадут из Melodia, папки будут забыты (файлы в них останутся). Плейлисты останутся пустыми.` : `Все ${tracksWord(allTracks.length)} пропадут с телефона. Плейлисты останутся пустыми.`)) {
+      await deleteTracks(allTracks.slice(), true);
+      if (nativeFiles) { lib.folders.forEach((f) => MelodiaAndroid.forgetFolder(f.uri)); lib.folders = []; lib.excluded = []; save(); }
+      render(); toast('Музыка удалена');
+    } break;
     default: break;
   }
 });
@@ -1067,6 +1322,8 @@ document.addEventListener('change', (e) => {
 });
 
 // ============================================================ boot
+let bootDone;
+const booted = new Promise((r) => { bootDone = r; });
 (async function boot() {
   hydrateIcons();
   history.replaceState({ depth: 1 }, '');
@@ -1078,6 +1335,7 @@ document.addEventListener('change', (e) => {
     }
     for (const [key, blob] of await db.entries('covers')) coverUrls.set(key, URL.createObjectURL(blob));
     allTracks = (await db.entries('tracks')).map(([, t]) => t).sort((a, b) => b.added - a.added);
+    for (const t of allTracks) if (t.cover && t.cover.startsWith('n-')) coverUrls.set(t.cover, nativeCoverUrl(t.cover));
     byId = new Map(allTracks.map((t) => [t.id, t]));
   } catch (e) { toast('Не удалось открыть медиатеку: ' + e.message, 'err'); }
   applyTheme(lib.settings.theme);
@@ -1093,5 +1351,9 @@ document.addEventListener('change', (e) => {
   }
   updateNowPlaying();
   render();
+  bootDone();
+  if (native && native.ready) native.ready();
+  // New files in the picked folders show up by themselves.
+  if (nativeFiles) for (const f of lib.folders) scanFolder(f, true);
   if ('serviceWorker' in navigator && location.protocol !== 'file:' && !native) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
